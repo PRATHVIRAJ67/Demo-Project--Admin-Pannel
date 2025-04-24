@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import { useNavigate } from 'react-router-dom';
-import './MenuItems.css'; // Import the CSS file
+import { v4 as uuidv4 } from 'uuid';
+import './MenuItems.css';
 
 // Initialize Supabase client - replace with your actual credentials
 const supabaseUrl = 'https://azzfgtymixbbseinydfo.supabase.co';
@@ -11,7 +12,6 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 const MenuItems = () => {
   const navigate = useNavigate();
   
-  // Function to handle back button click
   const handleBack = () => {
     navigate('/');
   };
@@ -27,6 +27,10 @@ const MenuItems = () => {
   });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [imageFile, setImageFile] = useState(null);
+  const [imagePreview, setImagePreview] = useState('');
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [isUploading, setIsUploading] = useState(false);
   
   const [newItem, setNewItem] = useState({
     name: '',
@@ -96,41 +100,62 @@ const MenuItems = () => {
     }
   };
 
-  // Function to insert initial data to Supabase (use once)
-  const uploadInitialData = async () => {
+  // Function to handle image file selection
+  const handleImageChange = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      setImageFile(file);
+      // Create a preview URL for the selected image
+      const previewUrl = URL.createObjectURL(file);
+      setImagePreview(previewUrl);
+      
+      // We don't need to update the object with previewImg anymore
+      // Just use the imagePreview state variable for displaying the preview
+    }
+  };
+
+  // Function to upload image to Supabase Storage
+  const uploadImage = async () => {
+    if (!imageFile) return null;
+    
     try {
-      setLoading(true);
-
-      const initialData = {
-        
-      };
-
-      // Flatten the array to upload all items
-      const allItems = Object.values(initialData).flat().map(item => {
-        // Convert days array to string if Supabase requires it
-        return {
-          ...item,
-          days: JSON.stringify(item.days)
-        };
-      });
-
-      // Insert data into Supabase
-      const { data, error } = await supabase
-        .from('menu_items')
-        .insert(allItems);
-
+      setIsUploading(true);
+      setUploadProgress(0);
+      
+      // Generate a unique filename to avoid collisions
+      const fileExt = imageFile.name.split('.').pop();
+      const fileName = `${uuidv4()}.${fileExt}`;
+      const filePath = `menu-images/${fileName}`;
+      
+      // Upload file to Supabase Storage
+      const { data, error } = await supabase.storage
+        .from('menu-images') // Replace with your bucket name
+        .upload(filePath, imageFile, {
+          cacheControl: '3600',
+          upsert: false,
+          onUploadProgress: (progress) => {
+            const percent = Math.round((progress.loaded / progress.total) * 100);
+            setUploadProgress(percent);
+          }
+        });
+      
       if (error) {
         throw error;
       }
-
-      alert('Initial data uploaded successfully!');
-      // Refresh the items display
-      fetchMenuItems();
+      
+      // Get public URL for the uploaded image
+      const { data: publicUrlData } = supabase.storage
+        .from('menu-images')
+        .getPublicUrl(filePath);
+      
+      setIsUploading(false);
+      setUploadProgress(100);
+      
+      return publicUrlData.publicUrl;
     } catch (error) {
-      console.error('Error uploading initial data:', error);
-      alert('Failed to upload initial data: ' + error.message);
-    } finally {
-      setLoading(false);
+      console.error('Error uploading image:', error);
+      setIsUploading(false);
+      throw error;
     }
   };
 
@@ -142,39 +167,70 @@ const MenuItems = () => {
       days: Array.isArray(item.days) ? item.days : JSON.parse(item.days)
     };
     setEditingItem(itemToEdit);
+    setImagePreview(item.img); // Set the current image as preview
     setShowAddForm(true);
   };
 
   // Function to handle menu item deletion
-  const handleDelete = async (itemId) => {
-    if (window.confirm('Are you sure you want to delete this item?')) {
-      try {
-        setLoading(true);
-        
-        // Delete item from Supabase
-        const { error } = await supabase
-          .from('menu_items')
-          .delete()
-          .eq('id', itemId);
-        
-        if (error) {
-          throw error;
-        }
-        
-        // Update local state
-        const updatedItems = {...menuItems};
-        updatedItems[activeCategory] = menuItems[activeCategory].filter(item => item.id !== itemId);
-        setMenuItems(updatedItems);
-        
-        alert('Item deleted successfully!');
-      } catch (error) {
-        console.error('Error deleting item:', error);
-        alert('Failed to delete item: ' + error.message);
-      } finally {
-        setLoading(false);
+ const handleDelete = async (itemId) => {
+  if (window.confirm('Are you sure you want to delete this item?')) {
+    try {
+      setLoading(true);
+      
+      // First, get the item to find its image URL
+      const { data: itemData, error: fetchError } = await supabase
+        .from('menu_items')
+        .select('img')
+        .eq('id', itemId)
+        .single();
+      
+      if (fetchError) {
+        throw fetchError;
       }
+      
+      // If the item has an image stored in Supabase storage, delete it
+      if (itemData && itemData.img) {
+        // Extract the file path from the URL
+        // Example URL: https://azzfgtymixbbseinydfo.supabase.co/storage/v1/object/public/menu-images/some-uuid.jpg
+        const urlParts = itemData.img.split('/');
+        const fileName = urlParts[urlParts.length - 1];
+        const filePath = `menu-images/${fileName}`;
+        
+        // Delete the file from storage
+        const { error: storageError } = await supabase.storage
+          .from('menu-images')
+          .remove([filePath]);
+          
+        if (storageError) {
+          console.error('Error deleting image from storage:', storageError);
+          // Continue with item deletion even if image deletion fails
+        }
+      }
+      
+      // Delete item from database
+      const { error } = await supabase
+        .from('menu_items')
+        .delete()
+        .eq('id', itemId);
+      
+      if (error) {
+        throw error;
+      }
+      
+      // Update local state
+      const updatedItems = {...menuItems};
+      updatedItems[activeCategory] = menuItems[activeCategory].filter(item => item.id !== itemId);
+      setMenuItems(updatedItems);
+      
+      alert('Item deleted successfully!');
+    } catch (error) {
+      console.error('Error deleting item:', error);
+      alert('Failed to delete item: ' + error.message);
+    } finally {
+      setLoading(false);
     }
-  };
+  }
+};
 
   // Function to handle input change for new item
   const handleInputChange = (e) => {
@@ -208,21 +264,35 @@ const MenuItems = () => {
     try {
       setLoading(true);
       
+      // Upload image first if there's a new image file
+      let imageUrl = null;
+      if (imageFile) {
+        imageUrl = await uploadImage();
+      }
+      
       if (editingItem) {
+        // Create a clean copy of the editing item without any extra properties
+        const { previewImg, ...cleanItemData } = editingItem;
+        
         // Prepare item for update - stringify days array if needed
         const itemToUpdate = {
-          ...editingItem,
-          days: Array.isArray(editingItem.days) 
-            ? JSON.stringify(editingItem.days) 
-            : editingItem.days,
+          ...cleanItemData,
+          days: Array.isArray(cleanItemData.days) 
+            ? JSON.stringify(cleanItemData.days) 
+            : cleanItemData.days,
           category: activeCategory
         };
+        
+        // Update image URL if a new image was uploaded
+        if (imageUrl) {
+          itemToUpdate.img = imageUrl;
+        }
         
         // Update item in Supabase
         const { error } = await supabase
           .from('menu_items')
           .update(itemToUpdate)
-          .eq('id', editingItem.id);
+          .eq('id', cleanItemData.id);
         
         if (error) {
           throw error;
@@ -230,12 +300,16 @@ const MenuItems = () => {
         
         alert('Item updated successfully!');
       } else {
+        // Create a clean copy of the new item without any extra properties
+        const { previewImg, ...cleanItemData } = newItem;
+        
         // Prepare new item for insertion
         const itemToAdd = {
-          ...newItem,
-          price: parseFloat(newItem.price),
-          days: JSON.stringify(newItem.days),
-          category: activeCategory
+          ...cleanItemData,
+          price: parseFloat(cleanItemData.price),
+          days: JSON.stringify(cleanItemData.days),
+          category: activeCategory,
+          img: imageUrl || cleanItemData.img // Use uploaded image URL or the URL entered manually
         };
         
         // Insert new item into Supabase
@@ -259,6 +333,11 @@ const MenuItems = () => {
         
         alert('New item added successfully!');
       }
+      
+      // Reset image state
+      setImageFile(null);
+      setImagePreview('');
+      setUploadProgress(0);
       
       // Refresh the items display
       fetchMenuItems();
@@ -307,7 +386,7 @@ const MenuItems = () => {
         </button>
       </div>
       
-      <h1 className="page-title"> Add or Edit Your Menu</h1>
+      <h1 className="page-title">Add or Edit Your Menu</h1>
       
       {/* Category tabs */}
       <div className="category-tabs">
@@ -336,6 +415,8 @@ const MenuItems = () => {
               days: [],
               category: activeCategory
             });
+            setImageFile(null);
+            setImagePreview('');
             setShowAddForm(!showAddForm);
           }}
           disabled={loading}
@@ -385,14 +466,61 @@ const MenuItems = () => {
             </div>
             
             <div className="form-group">
-              <label>Image URL:</label>
-              <input 
-                type="text" 
-                name="img" 
-                value={editingItem ? editingItem.img : newItem.img} 
-                onChange={handleInputChange} 
-                required 
-              />
+              <label>Image:</label>
+              <div className="image-upload-container">
+                {/* Image preview */}
+                {imagePreview && (
+                  <div className="image-preview-container">
+                    <img 
+                      src={imagePreview} 
+                      alt="Preview" 
+                      className="image-preview" 
+                      style={{ maxWidth: '200px', maxHeight: '200px', marginBottom: '10px' }} 
+                    />
+                  </div>
+                )}
+                
+                {/* File input for image upload */}
+                <div className="file-input-container">
+                  <input
+                    type="file"
+                    id="image-upload"
+                    accept="image/*"
+                    onChange={handleImageChange}
+                    style={{ display: 'none' }}
+                  />
+                  <label htmlFor="image-upload" className="upload-button">
+                    Choose Image
+                  </label>
+                  
+                  <span className="selected-file-name">
+                    {imageFile ? imageFile.name : 'No file selected'}
+                  </span>
+                </div>
+                
+                {/* Upload progress bar */}
+                {isUploading && (
+                  <div className="progress-container">
+                    <div 
+                      className="progress-bar" 
+                      style={{ width: `${uploadProgress}%` }}
+                    ></div>
+                    <span className="progress-text">{uploadProgress}%</span>
+                  </div>
+                )}
+                
+                {/* Manual URL input option */}
+                <div className="manual-url-input">
+                  <label>Or enter image URL:</label>
+                  <input 
+                    type="text" 
+                    name="img" 
+                    value={editingItem ? editingItem.img : newItem.img} 
+                    onChange={handleInputChange} 
+                    placeholder="https://example.com/image.jpg"
+                  />
+                </div>
+              </div>
             </div>
             
             <div className="form-group">
@@ -411,7 +539,7 @@ const MenuItems = () => {
               </div>
             </div>
             
-            <button type="submit" className="submit-button" disabled={loading}>
+            <button type="submit" className="submit-button" disabled={loading || isUploading}>
               {loading ? 'Saving...' : editingItem ? 'Update Item' : 'Add Item'}
             </button>
           </form>
@@ -443,9 +571,9 @@ const MenuItems = () => {
                   <td>{item.name}</td>
                   <td>{item.description}</td>
                   <td>₹{item.price.toFixed(2)}</td>
-
                   <td>{Array.isArray(item.days) ? item.days.join(', ') : JSON.parse(item.days).join(', ')}</td>
-                  <td className="action-buttons">
+                  <td >
+                    <div className='button'>
                     <button 
                       className="edit-button" 
                       onClick={() => handleEdit(item)}
@@ -460,6 +588,8 @@ const MenuItems = () => {
                     >
                       Delete
                     </button>
+                    </div>
+                    
                   </td>
                 </tr>
               ))}
